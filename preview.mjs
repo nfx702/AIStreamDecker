@@ -8,8 +8,8 @@ const t0 = 1_800_000_000_000;
 const tiles = [
   { app: 'claude', eff: 'attention', title: 'Checkout refactor', since: t0 - 95e3 },
   { app: 'claude', eff: 'working', title: 'Stream Deck Session Monitor', since: t0 - 12 * 60e3 },
-  { app: 'codex', eff: 'working', title: 'McDart', since: t0 - 3 * 60e3 },
-  { app: 'codex', eff: 'done', title: 'Scentsy Feed täglich kontrollieren', since: t0 - 3 * 3600e3 },
+  { app: 'codex', eff: 'working', title: 'API gateway', since: t0 - 3 * 60e3 },
+  { app: 'codex', eff: 'done', title: 'Weekly report check', since: t0 - 3 * 3600e3 },
   { app: 'claude', eff: 'idle', title: 'Home Assistant Mini-PC', since: t0 - 26 * 3600e3 },
   { app: 'codex', eff: 'error', title: 'Deploy pipeline', since: t0 - 7 * 60e3 },
 ];
