@@ -1,0 +1,4 @@
+node_modules/
+assets/
+gpt-ax/AIStreamDeckerGPT.app/
+.DS_Store
