@@ -5,13 +5,29 @@
 //  reads   ~/.ai-deck/gpt-ax-press.txt   a node path "0/3/1" -> AXPress on that element, then deletes the file
 import Cocoa
 
+func pathIndices(_ path: String) -> [Int]? {
+  let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+  let indices = parts.compactMap { Int($0) }
+  return !indices.isEmpty && indices.count == parts.count && indices.allSatisfy { $0 >= 0 } ? indices : nil
+}
+if CommandLine.arguments.contains("--self-test") {
+  precondition(pathIndices("0/3/1") == [0, 3, 1])
+  for invalid in ["", "-1", "0/-1", "0/nope/1", "0//1", "0/", "99999999999999999999999"] {
+    precondition(pathIndices(invalid) == nil)
+  }
+  print("accessibility path checks ok")
+  exit(0)
+}
+
+umask(0o077)
 let dir = NSHomeDirectory() + "/.ai-deck"
 let outFile = URL(fileURLWithPath: dir + "/gpt-ax.json")
 let pressFile = dir + "/gpt-ax-press.txt"
 let bundleId = "com.openai.codex"
 let attrs = ["AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXURL", "AXDOMClassList", "AXChildren"] as CFArray
 
-try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)
 // `--prompt`: ask macOS for the Accessibility grant exactly once, then quit (install.mjs runs this once).
 if CommandLine.arguments.contains("--prompt") {
   _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
@@ -46,9 +62,10 @@ func roots() -> [AXUIElement] {
 }
 
 func element(at path: String) -> AXUIElement? {
-  let idx = path.split(separator: "/").compactMap { Int($0) }
-  guard let first = idx.first, first < roots().count else { return nil }
-  var e = roots()[first]
+  guard let idx = pathIndices(path), let first = idx.first else { return nil }
+  let windows = roots()
+  guard first < windows.count else { return nil }
+  var e = windows[first]
   for i in idx.dropFirst() {
     guard let kids = fetch(e).last as? [AXUIElement], i < kids.count else { return nil }
     e = kids[i]

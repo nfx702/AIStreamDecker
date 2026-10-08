@@ -48,7 +48,7 @@ Every key also shows the **app icon** (Claude or ChatGPT), the **session title**
 ## Requirements
 
 - macOS (tested on macOS 26 / Apple Silicon)
-- Node.js ≥ 22 (uses the built-in `node:sqlite`)
+- Node.js ≥ 22.18 (uses the built-in `node:sqlite`; also required by the JPEG dependency)
 - An Elgato Stream Deck. Developed on a Stream Deck MK.2 / Original v2 (15 keys, 72×72 px). Other LCD models work too: key count and pixel size are read from the device.
 - **The Elgato Stream Deck app must not be running.** This project talks to the device directly over USB HID, and only one program can own it.
 - Claude Code (CLI and/or the Claude desktop app's Code tab) and/or the ChatGPT desktop app (bundle id `com.openai.codex`, which ships Codex)
@@ -63,8 +63,10 @@ node install.mjs
 
 `install.mjs` is idempotent and does two things:
 
-1. **Adds Claude Code hooks** to `~/.claude/settings.json` (a backup is written to `settings.json.bak-aideck`). Existing hooks are left alone.
+1. **Adds Claude Code hooks** to `~/.claude/settings.json`, creating it if needed. An existing file is backed up once to `settings.json.bak-aideck`; subsequent runs preserve that backup. Other hooks, including hooks in the same group, are left alone. Settings are replaced atomically.
 2. **Installs a LaunchAgent** (`de.nfxmedia.aistreamdecker`) that starts the deck daemon at login and restarts it if it dies.
+
+App icons are optional: if an app is absent or its icon cannot be extracted, its keys use a built-in text label.
 
 Uninstall everything:
 
@@ -84,7 +86,8 @@ node install.mjs --uninstall
   ```bash
   tail -f ~/.ai-deck/deck.log
   ```
-- Self-check of the hook state machine: `node test.mjs`
+- Regression checks: `npm test` (hooks, rollout parsing, rendering, installation and a simulated Stream Deck; uses a temporary home without modifying your services).
+- Optional Swift bridge path check: `swift gpt-ax/main.swift --self-test`.
 - Re-render the README preview after design changes: `node preview.mjs`
 
 ## How it works
@@ -117,13 +120,13 @@ Claude Code hooks are the most precise signal available. `hook.mjs` is registere
 | `StopFailure` | **error** |
 | `SessionStart` / `SessionEnd` | registers / removes the session |
 
-The state logic lives in the hook, not in the daemon, so the daemon can restart at any time without losing state. `test.mjs` exercises every transition.
+The state logic lives in the hook, not in the daemon, so the daemon can restart at any time without losing state. Status files are replaced atomically with owner-only permissions. `test.mjs` exercises the transitions and rejects malformed input.
 
 **Desktop mapping.** The Claude desktop app keeps one JSON file per Code-tab session. It contains `cliSessionId` (the id hooks see), `sessionId` (`local_…`, used by the deep link), `title`, `isArchived` and `lastFocusedAt`. The daemon joins both, so desktop sessions show their real title and open in the right tab. Desktop sessions without any hook activity yet are listed as idle.
 
 ### ChatGPT / Codex
 
-The ChatGPT desktop app stores every Codex thread in `~/.codex/state_5.sqlite` (`threads` table: title, `rollout_path`, `archived`, `updated_at_ms`). Each thread also has an append-only *rollout* JSONL file. The daemon reads the last ~512 KB of each active rollout, cached by file size, and takes the most recent lifecycle event:
+The ChatGPT desktop app stores every Codex thread in `~/.codex/state_5.sqlite` (`threads` table: title, `rollout_path`, `archived`, `updated_at_ms`). Each thread also has an append-only *rollout* JSONL file. On first use, the daemon scans backwards in 512 KB chunks to the most recent lifecycle event. Later reads cover appended records, retain the previous status across tool output, and retry incomplete records. The cache detects truncation, replacement and same-size rewrites using file size, modification time and inode:
 
 | Rollout event | State |
 |---|---|
@@ -138,7 +141,7 @@ Sub-agent threads (`source` is a JSON object) are hidden. Archived threads disap
 
 A finished session stays green until you have looked at it:
 
-- pressing its key marks it seen (persisted in `~/.ai-deck/seen.json`);
+- pressing its key marks it seen after the open command succeeds (persisted atomically in `~/.ai-deck/seen.json`);
 - for Claude desktop sessions, opening the session in the app counts (`lastFocusedAt`), and so does a session that finishes *while it is on screen* (Claude is the frontmost app and the session is the most recently focused one);
 - anything that finished more than 12 h ago is treated as seen, so old history never lights up.
 
@@ -150,7 +153,7 @@ Sessions are ranked by importance: **attention > error > done > working > idle**
 
 `render.mjs` builds one SVG per key (radial status glow, animated border, app icon, title, badge) and rasterizes it with [sharp](https://sharp.pixelplumbing.com/) into the raw RGB buffer the device expects. The JPEG encoding for the device happens inside `@elgato-stream-deck/node` (libjpeg-turbo).
 
-Animations (orbiting comet, pulse, breathing, `zzz`) are **quantized into a fixed number of phases**. Identical frames produce identical SVG strings, which hit an in-memory raster cache, and a key is only re-sent to the device when its SVG actually changed. The time label uses minute granularity for the same reason. The result is smooth ~12 fps animation at a few percent of one CPU core.
+Animations (orbiting comet, pulse, breathing, `zzz`) are **quantized into a fixed number of phases**. Identical frames produce identical SVG strings, which hit an in-memory raster cache, and a key is only re-sent to the device when its SVG actually changed. The cache retains at most 1,024 frames and evicts the oldest entry individually. The time label uses minute granularity for the same reason; drawing is scheduled at roughly 12 fps.
 
 ## Configuration
 
@@ -180,7 +183,7 @@ None of them shows **Claude Code and Codex side by side**, and none deep-links i
 
 Plain ChatGPT conversations (not Codex threads) are **not shown yet**. Unlike Codex, they live on the server: the app keeps no live local record of them. The only local cache (`codex.chatgpt-conversations` in the app's LocalStorage) is a stale list snapshot.
 
-The remaining local signal is the app's UI itself. [`gpt-ax/`](gpt-ax) contains a small Swift bridge (`AIStreamDeckerGPT.app`) that reads the ChatGPT window via the macOS Accessibility API. It dumps the tree to `~/.ai-deck/gpt-ax.json` and can press elements on request. All interpretation is meant to happen in JS, so the binary never needs rebuilding. It is installed only with `node install.mjs --gpt` and needs **Accessibility permission**.
+The remaining local signal is the app's UI itself. [`gpt-ax/`](gpt-ax) contains a small Swift bridge (`AIStreamDeckerGPT.app`) that reads the ChatGPT window via the macOS Accessibility API. It dumps the tree to `~/.ai-deck/gpt-ax.json` and can press elements on request. This directory is restricted to the current user because the tree can contain conversation text. Element paths are validated before use. All interpretation is meant to happen in JS, so routine interpretation changes do not require a binary rebuild. It is installed only with `node install.mjs --gpt` and needs **Accessibility permission**.
 
 Status: on the development machine, macOS (26) has not yet applied the grant to the bridge reliably. The details are in the troubleshooting section below. Once it reads the tree, the plan is to parse the sidebar's chat list and streaming indicators into the same state model.
 
@@ -209,7 +212,7 @@ Status: on the development machine, macOS (26) has not yet applied the grant to 
 | [`render.mjs`](render.mjs) | key artwork (SVG), animation phases, raster cache |
 | [`hook.mjs`](hook.mjs) | Claude Code hook → per-session status file |
 | [`install.mjs`](install.mjs) | installs/uninstalls hooks and LaunchAgents |
-| [`test.mjs`](test.mjs) | self-check for the hook state machine |
+| [`test.mjs`](test.mjs) | isolated regression checks for hooks, rollouts, rendering, installation and device handling |
 | [`preview.mjs`](preview.mjs) | renders `docs/preview.gif` |
 | [`gpt-ax/`](gpt-ax) | experimental Accessibility bridge for ChatGPT chats |
 | `assets/` | app icons, extracted from the installed apps by `install.mjs` (not committed: vendor trademarks) |

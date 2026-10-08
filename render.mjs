@@ -2,13 +2,13 @@
 import sharp from 'sharp';
 import fs from 'node:fs';
 
-const icon = n => fs.readFileSync(new URL(`./assets/${n}.png`, import.meta.url)).toString('base64');
+const icon = n => { try { return fs.readFileSync(new URL(`./assets/${n}.png`, import.meta.url)).toString('base64'); } catch { return null; } };
 const ICON = { claude: icon('claude'), codex: icon('chatgpt'), gpt: icon('chatgpt') };
 const P = 257.1; // perimeter of the rounded border rect (4 * (69 - 22) + 2π * 11)
 // palette of OpenAI x Work Louder "Codex Micro" (inactive / unread / thinking / needs approval / error), saturated a bit for the LCD
 const COLOR = { attention: '#ffa77a', done: '#7cf27a', working: '#7cc8ff', idle: '#d8d8de', error: '#ff6b6b' };
 
-const esc = t => t.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+const esc = t => String(t).toWellFormed().replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 export const ago = ms => (ms < 60e3 ? '<1m' : ms < 3600e3 ? `${Math.floor(ms / 60e3)}m` : ms < 86400e3 ? `${Math.floor(ms / 3600e3)}h` : `${Math.floor(ms / 86400e3)}d`);
 
 export function wrap(title, width = 12, max = 2) {
@@ -71,7 +71,7 @@ export function svg(s, size, now) {
 <defs><radialGradient id="g" cx="50%" cy="28%" r="75%"><stop offset="0" stop-color="${c}" stop-opacity="${tint.toFixed(2)}"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></radialGradient>
 <filter id="gray"><feColorMatrix type="saturate" values="0"/></filter><filter id="glow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="3"/></filter></defs>
 <rect width="72" height="72" fill="#060608"/><rect width="72" height="72" fill="url(#g)"/>${layer}
-<image href="data:image/png;base64,${ICON[s.app]}" x="22" y="9" width="28" height="28" ${dim ? 'filter="url(#gray)" opacity="0.45"' : ''} transform="rotate(${wiggle.toFixed(1)} 36 23)"/>
+<g ${dim ? 'filter="url(#gray)" opacity="0.45"' : ''} transform="rotate(${wiggle.toFixed(1)} 36 23)">${ICON[s.app] ? `<image href="data:image/png;base64,${ICON[s.app]}" x="22" y="9" width="28" height="28"/>` : `<text x="36" y="31" text-anchor="middle" font-size="22" font-weight="700" fill="#fff">${s.app === 'claude' ? 'C' : 'AI'}</text>`}</g>
 <text x="6" y="12" font-size="8.5" font-weight="600" fill="${dim ? '#77777d' : '#d0d0d6'}">${esc(ago(now - s.since))}</text>${badge}${title}</svg>`;
 }
 
@@ -88,8 +88,8 @@ const cache = new Map();
 export async function render(svgText) {
   let b = cache.get(svgText);
   if (!b) {
-    if (cache.size > 3000) cache.clear();
     b = await sharp(Buffer.from(svgText)).removeAlpha().raw().toBuffer();
+    if (cache.size >= 1024) cache.delete(cache.keys().next().value);
     cache.set(svgText, b);
   }
   return b;

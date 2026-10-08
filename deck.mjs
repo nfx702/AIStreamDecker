@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
 const DECK_DIR = path.join(HOME, '.ai-deck');
@@ -28,32 +29,40 @@ const CODEX_EVENTS = {
 };
 
 const ls = d => { try { return fs.readdirSync(d); } catch { return []; } };
-const readJson = f => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+const readJson = f => { try { const v = JSON.parse(fs.readFileSync(f, 'utf8')); return v && typeof v === 'object' && !Array.isArray(v) ? v : null; } catch { return null; } };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------- seen state (which "done" sessions you already looked at) ----------
 let seen = readJson(SEEN_FILE);
-const firstRun = !seen;
+let firstRun = !seen;
 seen ??= {};
+function saveSeen() {
+  fs.mkdirSync(DECK_DIR, { recursive: true, mode: 0o700 });
+  const tmp = `${SEEN_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(seen), { mode: 0o600 });
+  fs.renameSync(tmp, SEEN_FILE);
+}
 function markSeen(key) {
   seen[key] = Date.now();
   for (const k in seen) if (Date.now() - seen[k] > 2 * WINDOW) delete seen[k];
-  fs.mkdirSync(DECK_DIR, { recursive: true });
-  fs.writeFileSync(SEEN_FILE, JSON.stringify(seen));
+  saveSeen();
 }
 
 // ---------- Claude Code (hook files + desktop session store) ----------
 const desktopCache = new Map(); // file -> { mtime, data }
 function desktopSessions() {
   const byCli = new Map();
+  const files = new Set();
   for (const a of ls(DESKTOP_DIR)) for (const b of ls(path.join(DESKTOP_DIR, a))) for (const f of ls(path.join(DESKTOP_DIR, a, b))) {
     if (!/^local_.*\.json$/.test(f)) continue;
     const file = path.join(DESKTOP_DIR, a, b, f);
+    files.add(file);
     let mtime; try { mtime = fs.statSync(file).mtimeMs; } catch { continue; }
     let c = desktopCache.get(file);
     if (c?.mtime !== mtime) desktopCache.set(file, c = { mtime, data: readJson(file) });
     if (c.data?.cliSessionId) byCli.set(c.data.cliSessionId, c.data);
   }
+  for (const file of desktopCache.keys()) if (!files.has(file)) desktopCache.delete(file);
   return byCli;
 }
 
@@ -63,7 +72,8 @@ function claudeSessions(now, front) {
   let onScreen = null;
   if (front === CLAUDE_BUNDLE) for (const d of desk.values()) if (!onScreen || d.lastFocusedAt > onScreen.lastFocusedAt) onScreen = d;
   const out = [];
-  const hooks = new Map(ls(HOOK_DIR).map(f => readJson(path.join(HOOK_DIR, f))).filter(Boolean).map(h => [h.sid, h]));
+  const hooks = new Map(ls(HOOK_DIR).filter(f => f.endsWith('.json')).map(f => readJson(path.join(HOOK_DIR, f)))
+    .filter(h => h && typeof h.sid === 'string' && Object.hasOwn(PRI, h.state) && Number.isFinite(h.at) && Number.isFinite(h.since)).map(h => [h.sid, h]));
   for (const [sid, d] of desk) {
     if (!hooks.has(sid) && !d.isArchived && now - (d.lastActivityAt ?? 0) < WINDOW)
       hooks.set(sid, { sid, cwd: d.cwd, state: 'idle', since: d.lastActivityAt, at: d.lastActivityAt });
@@ -76,49 +86,70 @@ function claudeSessions(now, front) {
     const state = h.state === 'working' && now - h.at > STALE_WORK ? 'idle' : h.state;
     out.push({
       key: `claude:${h.sid}`, app: 'claude', state, since: h.since,
-      title: d?.title || path.basename(h.cwd || '') || 'Claude',
+      title: d?.title || path.basename(typeof h.cwd === 'string' ? h.cwd : '') || 'Claude',
       seenAt: d?.lastFocusedAt ?? 0, onScreen: !!d && d === onScreen,
-      open: d ? ['open', [`claude://code/continue?session=${d.sessionId}`]] : ['open', ['-a', TERMS[h.term] ?? 'Terminal']],
+      open: d ? ['open', [`claude://code/continue?session=${encodeURIComponent(d.sessionId)}`]] : ['open', ['-a', Object.hasOwn(TERMS, h.term) ? TERMS[h.term] : 'Terminal']],
     });
   }
   return out;
 }
 
 // ---------- ChatGPT / Codex (thread db + rollout tail) ----------
-let db;
-const rolloutCache = new Map(); // path -> { size, v }
-function rolloutState(p) {
-  let st; try { st = fs.statSync(p); } catch { return { state: 'idle', since: 0, mtime: 0 }; }
-  const c = rolloutCache.get(p);
-  if (c?.size === st.size) return c.v;
-  const len = Math.min(st.size, 512 * 1024);
-  const buf = Buffer.alloc(len);
-  const fd = fs.openSync(p, 'r');
-  fs.readSync(fd, buf, 0, len, st.size - len);
-  fs.closeSync(fd);
-  const lines = buf.toString('utf8').split('\n');
-  let v = { state: 'idle', since: st.mtimeMs, mtime: st.mtimeMs };
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const m = lines[i].match(/^\{"timestamp":"([^"]+)".*?"type":"event_msg","payload":\{"type":"([a-z_]+)"/);
-    if (m && CODEX_EVENTS[m[2]]) { v = { state: CODEX_EVENTS[m[2]], since: Date.parse(m[1]), mtime: st.mtimeMs }; break; }
-  }
-  rolloutCache.set(p, { size: st.size, v });
-  return v;
+let db, threadQuery;
+const rolloutCache = new Map(); // path -> { size, mtime, ino, offset (last newline), v }
+export function rolloutState(p) {
+  let fd;
+  try {
+    fd = fs.openSync(p, 'r');
+    const st = fs.fstatSync(fd), c = rolloutCache.get(p);
+    if (c?.size === st.size && c.mtime === st.mtimeMs && c.ino === st.ino) return c.v;
+    const append = c && c.ino === st.ino && st.size > c.size;
+    const floor = append ? c.offset : 0;
+    let v = { ...(append ? c.v : { state: 'idle', since: st.mtimeMs }), mtime: st.mtimeMs };
+    let end = st.size, carry = '', offset = floor;
+    // ponytail: cold reads scan backwards; index events if startup I/O becomes costly. Later reads only cover appended records.
+    scan: while (end > floor) {
+      const start = Math.max(floor, end - 512 * 1024);
+      const buf = Buffer.alloc(end - start);
+      const bytes = buf.subarray(0, fs.readSync(fd, buf, 0, buf.length, start));
+      if (offset === floor && bytes.lastIndexOf(10) >= 0) offset = start + bytes.lastIndexOf(10) + 1;
+      const lines = (bytes.toString('utf8') + carry).split('\n');
+      carry = start > floor ? lines.shift() : '';
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('event_msg')) continue;
+        let event; try { event = JSON.parse(lines[i]); } catch { continue; }
+        const type = event?.payload?.type, since = Date.parse(event?.timestamp);
+        if (event?.type === 'event_msg' && Object.hasOwn(CODEX_EVENTS, type) && Number.isFinite(since)) {
+          v = { state: CODEX_EVENTS[type], since, mtime: st.mtimeMs };
+          break scan;
+        }
+      }
+      end = start;
+    }
+    rolloutCache.set(p, { size: st.size, mtime: st.mtimeMs, ino: st.ino, offset, v });
+    return v;
+  } catch { return { state: 'idle', since: 0, mtime: 0 }; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
 function codexSessions(now) {
   try {
+    if (!db && !fs.existsSync(CODEX_DB)) return [];
     db ??= new DatabaseSync(CODEX_DB, { readOnly: true });
-    const rows = db.prepare(`select id, coalesce(nullif(name,''), nullif(title,''), cwd) as title, rollout_path as p
-      from threads where archived = 0 and source not like '{%' and updated_at_ms > ?`).all(now - WINDOW);
+    threadQuery ??= db.prepare(`select id, coalesce(nullif(name,''), nullif(title,''), cwd) as title, rollout_path as p
+      from threads where archived = 0 and source not like '{%' and updated_at_ms > ?`);
+    const rows = threadQuery.all(now - WINDOW);
+    const paths = new Set(rows.map(r => r.p));
+    for (const p of rolloutCache.keys()) if (!paths.has(p)) rolloutCache.delete(p);
     return rows.map(r => {
       const v = rolloutState(r.p);
       const state = v.state === 'working' && now - v.mtime > STALE_WORK ? 'idle' : v.state;
-      return { key: `codex:${r.id}`, app: 'codex', title: r.title, state, since: v.since, seenAt: 0, open: ['open', [`codex://threads/${r.id}`]] };
+      return { key: `codex:${r.id}`, app: 'codex', title: r.title, state, since: v.since, seenAt: 0, open: ['open', [`codex://threads/${encodeURIComponent(r.id)}`]] };
     });
   } catch (e) {
     log('codex read failed:', e.message);
-    db = undefined;
+    try { db?.close(); } catch {}
+    db = threadQuery = undefined;
     return [];
   }
 }
@@ -135,12 +166,16 @@ function effective(s, now) {
 }
 
 const frontApp = () => new Promise(res =>
-  execFile('/bin/sh', ['-c', 'lsappinfo info -only bundleid "$(lsappinfo front)"'], (e, out) => res(out?.match(/="([^"]+)"/)?.[1] ?? null)));
+  execFile('/bin/sh', ['-c', 'lsappinfo info -only bundleid "$(lsappinfo front)"'], { timeout: 1000 }, (e, out) => res(out?.match(/="([^"]+)"/)?.[1] ?? null)));
 
 async function refresh(n) {
   const now = Date.now();
   const list = [...claudeSessions(now, await frontApp()), ...codexSessions(now)];
-  if (firstRun && !sessions.size) for (const s of list) if (s.state === 'done') seen[s.key] = now; // don't light up history on first start
+  if (firstRun) {
+    for (const s of list) if (s.state === 'done') seen[s.key] = now; // don't light up history on first start
+    saveSeen();
+    firstRun = false;
+  }
   for (const s of list) {
     if (s.onScreen && s.state === 'done' && (seen[s.key] ?? 0) < s.since) markSeen(s.key); // finished while you watched it
     s.eff = effective(s, now);
@@ -166,33 +201,47 @@ let lastSig;
 let deck = null, keys = [], lastSvg = [];
 
 async function connect() {
-  for (;;) {
+  for (const info of await listStreamDecks()) {
+    let d, failed = false;
     try {
-      const [info] = await listStreamDecks();
-      if (info) {
-        const d = await openStreamDeck(info.path);
-        keys = d.CONTROLS.filter(c => c.type === 'button' && c.feedbackType === 'lcd');
-        lastSvg = [];
-        await d.clearPanel();
-        await d.setBrightness(BRIGHTNESS);
-        d.on('down', c => press(typeof c === 'number' ? c : c.index));
-        d.on('error', e => { log('deck error:', e?.message ?? e); deck = null; d.close().catch(() => {}); connect(); });
-        log(`connected: ${d.PRODUCT_NAME} (${keys.length} keys)`);
-        return (deck = d);
-      }
-    } catch (e) { log('connect failed:', e.message); }
-    await new Promise(r => setTimeout(r, 3000));
+      d = await openStreamDeck(info.path);
+      d.on('error', e => {
+        if (failed) return;
+        failed = true;
+        log('deck error:', e?.message ?? e);
+        if (deck === d) deck = null;
+        d.close().catch(() => {});
+      });
+      const controls = d.CONTROLS.filter(c => c.type === 'button' && c.feedbackType === 'lcd');
+      if (controls.length < 2) { failed = true; await d.close(); continue; }
+      await d.clearPanel();
+      await d.setBrightness(BRIGHTNESS);
+      if (failed) continue;
+      keys = controls;
+      lastSvg = [];
+      d.on('down', c => { if (deck === d) press(c); });
+      log(`connected: ${d.PRODUCT_NAME} (${keys.length} keys)`);
+      return (deck = d);
+    } catch (e) {
+      log('connect failed:', e.message);
+      if (!failed) { failed = true; await d?.close().catch(() => {}); }
+    }
   }
 }
 
-function press(index) {
+function press(control) {
+  if (typeof control !== 'number' && (control?.type !== 'button' || control.feedbackType !== 'lcd')) return;
+  const index = keys.findIndex(k => k.index === (typeof control === 'number' ? control : control.index));
+  if (index < 0) return;
   if (pages.length > 1 && index === keys.length - 1) { page = (page + 1) % pages.length; pageAt = Date.now(); return; }
   const s = sessions.get(pages[page]?.[index]);
   if (!s) return;
   pageAt = Date.now();
-  if (s.eff === 'done') markSeen(s.key);
   log('open', s.key, s.title);
-  execFile(s.open[0], s.open[1], e => e && log('open failed:', e.message));
+  execFile(s.open[0], s.open[1], { timeout: 5000 }, e => {
+    if (e) return log('open failed:', e.message);
+    if (s.eff === 'done') try { markSeen(s.key); } catch (e) { log('mark seen failed:', e.message); }
+  });
 }
 
 let busy = false;
@@ -202,15 +251,22 @@ async function draw() {
   busy = true;
   try {
     const now = Date.now();
-    for (const k of keys) {
+    const frames = lastSvg, visible = pages[page], controls = keys;
+    const currentPage = page, pageCount = pages.length, more = hidden;
+    for (const [index, k] of controls.entries()) {
+      if (deck !== d) break;
       const size = k.pixelSize.width;
-      const pager = pages.length > 1 && k.index === keys.length - 1;
-      const s = sessions.get(pages[page]?.[k.index]);
-      const text = pager ? pagerSvg(size, page, pages.length, hidden) : s ? svg(s, size, now) : null;
-      if (text === lastSvg[k.index]) continue;
-      if (text) await d.fillKeyBuffer(k.index, await render(text), { format: 'rgb' });
+      const pager = pageCount > 1 && index === controls.length - 1;
+      const s = sessions.get(visible?.[index]);
+      const text = pager ? pagerSvg(size, currentPage, pageCount, more) : s ? svg(s, size, now) : null;
+      if (text === frames[index]) continue;
+      if (text) {
+        const buffer = await render(text);
+        if (deck !== d) break;
+        await d.fillKeyBuffer(k.index, buffer, { format: 'rgb' });
+      }
       else await d.clearKey(k.index);
-      lastSvg[k.index] = text;
+      frames[index] = text;
     }
   } catch (e) { log('draw failed:', e.message); }
   busy = false;
@@ -222,10 +278,18 @@ async function shutdown() {
   try { await d?.clearPanel(); await d?.close(); } catch {}
   process.exit(0);
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-
-await connect();
-await refresh(keys.length);
-setInterval(() => refresh(keys.length || 15).catch(e => log('refresh failed:', e.message)), 1000);
-setInterval(draw, 80);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  let refreshing = false;
+  const tick = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    try { if (!deck) await connect(); if (deck) await refresh(keys.length); }
+    catch (e) { log('refresh failed:', e.message); }
+    finally { refreshing = false; }
+  };
+  await tick();
+  setInterval(tick, 1000);
+  setInterval(draw, 80);
+}
