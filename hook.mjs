@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 process.umask(0o077);
 const DIR = path.join(os.homedir(), '.ai-deck', 'claude');
@@ -35,11 +36,20 @@ const state = {
 if (typeof state !== 'string') process.exit(0);
 
 const now = Date.now();
+const term = process.env.TERM_PROGRAM ?? prev.term ?? null;
+let tty = prev.tty ?? null;
+if (term === 'Apple_Terminal' && (ev === 'SessionStart' || !Object.hasOwn(prev, 'tty'))) {
+  try {
+    const name = execFileSync('/bin/ps', ['-o', 'tty=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 500 }).trim();
+    tty = /^ttys?\d+$/.test(name) ? `/dev/${name}` : null;
+  } catch { tty = null; }
+}
 const tmp = `${file}.${process.pid}.tmp`;
 fs.writeFileSync(tmp, JSON.stringify({
   sid, cwd: typeof cwd === 'string' ? cwd : prev.cwd, state,
   since: state === prev.state && Number.isFinite(prev.since) ? prev.since : now,
   at: now,
-  term: process.env.TERM_PROGRAM ?? prev.term ?? null,
+  term, tty,
+  terminalSession: process.env.ITERM_SESSION_ID ?? prev.terminalSession ?? null,
 }));
 fs.renameSync(tmp, file);

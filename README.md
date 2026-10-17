@@ -1,7 +1,7 @@
 # AI Stream Decker
 
 **Turn an Elgato Stream Deck into a live control center for your AI agents.**
-Every Claude Code session and every ChatGPT/Codex thread gets its own key. The key shows what that agent is doing *right now*: thinking, waiting for your approval, finished, failed or idle. Pressing the key jumps straight into that exact session.
+Every Claude Code session and every ChatGPT/Codex thread gets its own key. The key shows what that agent is doing *right now*: thinking, waiting for your approval, finished, failed or idle. Open sessions with one press, group them by project, and pin the ones you keep coming back to. A dedicated **Braucht mich** key takes you through pending questions and approvals.
 
 ![Animated preview of all key states](docs/preview.gif)
 
@@ -37,19 +37,20 @@ The palette follows the Codex Micro status colors, slightly saturated so they gl
 
 | State | Look | Meaning | Codex Micro equivalent |
 |---|---|---|---|
-| **attention** | peach, pulsing border, wiggling icon, `?` badge | The agent is blocked on you: permission prompt, `AskUserQuestion`, plan approval | "User approval required / question" |
-| **working** | blue, glowing comet orbiting the key | The agent is thinking or running tools | "Thinking" |
-| **done** | green, breathing border, `✓` badge | Finished, and you haven't looked at it yet | "Unread chat" |
-| **error** | red, pulsing, `✕` badge | The turn ended on an API or stream error | "Error" |
-| **idle** | dimmed, grayscale icon, slow `zzz` | Nothing happening (idle sessions are listed too, as a quick switcher) | "Inactive" |
+| **attention** | peach, pulsing border, `?` badge | The agent is blocked on you: permission prompt, `AskUserQuestion`, plan approval | "User approval required / question" |
+| **working** | steady blue, `•` badge | The agent is thinking or running tools | "Thinking" |
+| **done** | green, brief pulse during the first four seconds, then steady, `✓` badge | Finished, and you haven't looked at it yet | "Unread chat" |
+| **error** | steady red, `!` badge | The turn ended on an API or stream error | "Error" |
+| **idle** | dimmed, grayscale icon, no animation | Nothing happening (idle sessions are listed too, as a quick switcher) | "Inactive" |
+| **unknown** | purple dashed border, `–` badge | The source is unreadable, has no known status, or stopped reporting activity | — |
 
-Every key also shows the **app icon** (Claude or ChatGPT), the **session title** (two lines) and the **time spent in the current state** (top left: `<1m`, `12m`, `3h`, `2d`).
+Every key shows a small **app icon**, **project name**, up to **three title lines**, and a **status with elapsed time** at the bottom (`<1m`, `12m`, `3h`, `2d`). Long titles keep their ending so similar tasks remain distinguishable; identical visible labels receive `#1`, `#2`, etc. Pinned sessions have a small pin symbol. Unknown sessions show **Stand …**, the age of the last successful read (or last activity for stale working sessions), instead of pretending to be idle.
 
 ## Requirements
 
 - macOS (tested on macOS 26 / Apple Silicon)
 - Node.js ≥ 22.18 (uses the built-in `node:sqlite`; also required by the JPEG dependency)
-- An Elgato Stream Deck. Developed on a Stream Deck MK.2 / Original v2 (15 keys, 72×72 px). Other LCD models work too: key count and pixel size are read from the device.
+- An Elgato Stream Deck with at least four LCD keys. Developed on a Stream Deck MK.2 / Original v2 (15 keys, 72×72 px). Key count and pixel size are read from the device; pedals and encoders are ignored.
 - **The Elgato Stream Deck app must not be running.** This project talks to the device directly over USB HID, and only one program can own it.
 - Claude Code (CLI and/or the Claude desktop app's Code tab) and/or the ChatGPT desktop app (bundle id `com.openai.codex`, which ships Codex)
 
@@ -78,15 +79,23 @@ node install.mjs --uninstall
 
 - **Press a session key** to jump into it:
   - Claude desktop sessions open via `claude://code/continue?session=local_…`.
-  - Claude CLI sessions activate the terminal app they run in (from `TERM_PROGRAM`).
+  - Claude CLI sessions target their **iTerm pane or Terminal tab** when the hook captured its identity. Other terminals fall back to opening the app and briefly show **Nur App geöffnet** on the key.
   - Codex threads open via `codex://threads/<id>`.
-- **Press the pager key** (bottom right, `+N more`) to flip through additional pages. The deck returns to page 1 after 20 s without a key press.
+- **Hold a session key for 0.7 s** to pin or unpin it. Pins are saved separately in the all-sessions view and each project. An ended pinned session keeps its key as **Nicht aktiv** until you unpin it.
+- **Projekte** opens the project overview. Each project shows how many sessions are active or waiting, plus an unknown-status count when needed. Press a project to see its sessions; press **Projekte** again to go back. Hold the navigation key to return directly to all sessions.
+- **Braucht mich** shows the number of waiting sessions across all projects. Each press opens the next one, starting with the oldest request. Resolved requests leave the queue automatically. This opens the session; it does not answer questions or approve actions.
+- **Seite** (bottom right, e.g. `2 / 4`) moves to the next page. Hold it to go back. Pages stay where you left them by default; an automatic return to page 1 is optional.
+
+The last three keys always contain project navigation, **Braucht mich**, and the pager. On a 15-key deck this leaves **12 session keys per page**. A short press takes effect on release; a long press performs only the hold action.
+
+![Project overview with active, waiting and unknown counts](docs/projects.png)
+
 - Watch what the deck is showing:
 
   ```bash
   tail -f ~/.ai-deck/deck.log
   ```
-- Regression checks: `npm test` (hooks, rollout parsing, rendering, installation and a simulated Stream Deck; uses a temporary home without modifying your services).
+- Regression checks: `npm test` (hooks, source failures and recovery, rollout parsing, rendering, installation, terminal targets, and a simulated Stream Deck including projects, pins, paging and the waiting queue; uses a temporary home without modifying your services).
 - Optional Swift bridge path check: `swift gpt-ax/main.swift --self-test`.
 - Re-render the README preview after design changes: `node preview.mjs`
 
@@ -122,6 +131,8 @@ Claude Code hooks are the most precise signal available. `hook.mjs` is registere
 
 The state logic lives in the hook, not in the daemon, so the daemon can restart at any time without losing state. Status files are replaced atomically with owner-only permissions. `test.mjs` exercises the transitions and rejects malformed input.
 
+**CLI tab targeting.** The hook records `ITERM_SESSION_ID` for iTerm and the parent process's terminal device for Apple Terminal. iTerm opens its existing pane through the native [`iterm2:reveal` URL](https://iterm2.com/documentation-url-scheme.html). Terminal uses AppleScript to find the matching `tty`, select its tab and bring its window forward. macOS may ask for Automation permission the first time. Older sessions acquire the metadata on a subsequent hook event; starting a new session also refreshes it. If exact targeting is unavailable or the command fails, the key shows a fallback notice and the session is not marked seen merely because its terminal app opened.
+
 **Desktop mapping.** The Claude desktop app keeps one JSON file per Code-tab session. It contains `cliSessionId` (the id hooks see), `sessionId` (`local_…`, used by the deep link), `title`, `isArchived` and `lastFocusedAt`. The daemon joins both, so desktop sessions show their real title and open in the right tab. Desktop sessions without any hook activity yet are listed as idle.
 
 ### ChatGPT / Codex
@@ -137,34 +148,44 @@ The ChatGPT desktop app stores every Codex thread in `~/.codex/state_5.sqlite` (
 
 Sub-agent threads (`source` is a JSON object) are hidden. Archived threads disappear. "Work" and voice threads from the app are included.
 
+Read errors retain previously known sessions as **unknown**, including during database migrations or temporarily unavailable rollout files. The next successful refresh restores their status. Without a cached thread list, an unreadable Codex source gets its own diagnostic key. A successful read that contains no recognized lifecycle event also yields unknown. Claude hook read failures retain known sessions in the same way; a normal `SessionEnd` removes them.
+
 ### "Seen" logic
 
 A finished session stays green until you have looked at it:
 
-- pressing its key marks it seen after the open command succeeds (persisted atomically in `~/.ai-deck/seen.json`);
+- pressing its key marks it seen after the session-specific open command succeeds (persisted atomically in `~/.ai-deck/seen.json`); merely activating a terminal app does not count;
 - for Claude desktop sessions, opening the session in the app counts (`lastFocusedAt`), and so does a session that finishes *while it is on screen* (Claude is the frontmost app and the session is the most recently focused one);
 - anything that finished more than 12 h ago is treated as seen, so old history never lights up.
 
 ### Key layout and paging
 
-Sessions are ranked by importance: **attention > error > done > working > idle**, then by recency. The top sessions get **stable key positions**: a key keeps its session while that session stays on page 1, and new sessions take free keys. Status changes therefore don't reshuffle the deck under your fingers. When there are more sessions than keys, the last key becomes a pager and the overflow is spread over further pages.
+New layouts rank sessions by importance: **attention > error > unknown > done > working > idle**, then by recency. Positions remain stable on **every page** while the daemon runs: state changes do not move existing sessions, new sessions fill gaps, and unused trailing pages disappear. Project views keep their own layouts. A press targets the key that was displayed when the press began, even if a refresh happens while it is held.
+
+Pins reserve their positions across restarts and even while a session is inactive. Unpinned sessions are ranked again after a restart. Projects are grouped by their normalized working directory (`cwd`); sessions without one appear under **Allgemein**. Projects with the same folder name include their parent folder in the label. The global waiting queue remains accessible from every view.
 
 ### Rendering pipeline
 
 `render.mjs` builds one SVG per key (radial status glow, animated border, app icon, title, badge) and rasterizes it with [sharp](https://sharp.pixelplumbing.com/) into the raw RGB buffer the device expects. The JPEG encoding for the device happens inside `@elgato-stream-deck/node` (libjpeg-turbo).
 
-Animations (orbiting comet, pulse, breathing, `zzz`) are **quantized into a fixed number of phases**. Identical frames produce identical SVG strings, which hit an in-memory raster cache, and a key is only re-sent to the device when its SVG actually changed. The cache retains at most 1,024 frames and evicts the oldest entry individually. The time label uses minute granularity for the same reason; drawing is scheduled at roughly 12 fps.
+Only attention keeps pulsing; done pulses briefly and all other states stay still. Animation is **quantized into a fixed number of phases**. Identical frames produce identical SVG strings, which hit an in-memory raster cache, and a key is only re-sent to the device when its SVG actually changed. The cache retains at most 1,024 frames and evicts the oldest entry individually. Time labels use minute granularity; drawing is scheduled at roughly 12 fps.
 
 ## Configuration
 
-Tunables are constants at the top of [`deck.mjs`](deck.mjs):
+Pins and page behavior live in `~/.ai-deck/preferences.json`, saved automatically when you pin a session. Changes are picked up on the next refresh. `pageResetSeconds` defaults to **0** (disabled). To return to page 1 after 20 seconds, set it to `20`; leave the existing `pins` array intact. If the file does not exist yet, you can create it with:
+
+```json
+{ "pageResetSeconds": 20, "pins": [] }
+```
+
+Other tunables are constants at the top of [`deck.mjs`](deck.mjs):
 
 | Constant | Default | Meaning |
 |---|---|---|
 | `WINDOW` | 3 days | sessions without activity for this long are hidden |
 | `DONE_FRESH` | 12 h | a finished session stays highlighted this long unless you look at it |
-| `STALE_WORK` | 30 min | "working" without any sign of life for this long is shown as idle (crashed sessions) |
-| `PAGE_RESET` | 20 s | return to page 1 after this long without a key press |
+| `STALE_WORK` | 30 min | "working" without any sign of life for this long is shown as unknown |
+| `HOLD` | 700 ms | hold duration for pinning, backward paging and returning to all sessions |
 | `BRIGHTNESS` | 70 | panel brightness in percent |
 
 Colors and animation timings live in [`render.mjs`](render.mjs) (`COLOR`, `stateLayer`).
@@ -193,7 +214,9 @@ Status: on the development machine, macOS (26) has not yet applied the grant to 
 - Codex approval prompts appear as attention only if Codex writes the request into the rollout. Otherwise the thread stays "working".
 - For Codex, "seen" only works by key press, because the app does not record which thread you are looking at.
 - Sessions that ran before installation appear after their next hook event (desktop sessions appear immediately as idle).
-- A crashed "working" session turns idle after `STALE_WORK`. There is no process liveness check.
+- A "working" session without new activity turns unknown after `STALE_WORK`. There is no process liveness check; a long silent task can also trigger this state.
+- Exact CLI targeting currently supports Apple Terminal and iTerm. Other terminals open at app level. An accepted app URL does not provide confirmation that the destination session still exists.
+- Project grouping uses the session's exact working directory; separate subdirectories and worktrees appear as separate projects.
 
 ## Troubleshooting
 
@@ -201,7 +224,9 @@ Status: on the development machine, macOS (26) has not yet applied the grant to 
 |---|---|
 | Deck stays dark | Quit the Elgato Stream Deck app, then `launchctl kickstart -k gui/$(id -u)/de.nfxmedia.aistreamdecker` |
 | A Claude session never changes state | It was started before the hooks were installed. Send it one more prompt, or restart it. |
-| `deck.log` shows `codex read failed` | The ChatGPT app is migrating its database. It recovers on the next refresh. |
+| `deck.log` shows `codex read failed` | Check whether the Codex database is being migrated or is unavailable. Known sessions remain visible as unknown and recover after a successful refresh. |
+| A terminal key shows `Nur App geöffnet` | Start a new Claude CLI session to capture its terminal identity. For Apple Terminal, allow Automation access when macOS asks. Other terminal apps currently use app-level fallback. |
+| A pinned key says `Nicht aktiv` | The session ended or left the activity window. Hold the key to free its reserved position. |
 | GPT bridge reports `"trusted": false` | Remove every `AIStreamDeckerGPT` / `gpt-ax` entry under *System Settings → Privacy & Security → Accessibility*, run `tccutil reset Accessibility de.nfxmedia.aistreamdecker.gpt`, then add `gpt-ax/AIStreamDeckerGPT.app` again. `build.sh` signs with your *Apple Development* identity when one exists, so the grant survives rebuilds. |
 
 ## Project layout
@@ -209,10 +234,11 @@ Status: on the development machine, macOS (26) has not yet applied the grant to 
 | File | Purpose |
 |---|---|
 | [`deck.mjs`](deck.mjs) | daemon: data sources, ranking, stable slots, paging, device I/O, key presses |
+| [`model.mjs`](model.mjs) | project grouping, stable slots, validated preferences and waiting queue |
 | [`render.mjs`](render.mjs) | key artwork (SVG), animation phases, raster cache |
 | [`hook.mjs`](hook.mjs) | Claude Code hook → per-session status file |
 | [`install.mjs`](install.mjs) | installs/uninstalls hooks and LaunchAgents |
-| [`test.mjs`](test.mjs) | isolated regression checks for hooks, rollouts, rendering, installation and device handling |
-| [`preview.mjs`](preview.mjs) | renders `docs/preview.gif` |
+| [`test.mjs`](test.mjs) | isolated regression checks for sources, rendering, installation, terminals and deck interactions |
+| [`preview.mjs`](preview.mjs) | renders the session deck animation and project overview in `docs/` |
 | [`gpt-ax/`](gpt-ax) | experimental Accessibility bridge for ChatGPT chats |
 | `assets/` | app icons, extracted from the installed apps by `install.mjs` (not committed: vendor trademarks) |
