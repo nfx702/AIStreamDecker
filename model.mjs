@@ -19,21 +19,26 @@ export function preferences(value) {
   return { pageResetSeconds: Number.isFinite(seconds) && seconds >= 0 && seconds <= 86400 ? seconds : 0, pins };
 }
 
-// Slots are retained across every page. Missing pinned sessions keep their reserved position.
-export function stableSlots(items, previous = [], pins = []) {
-  const live = new Set(items.map(s => s.key)), placed = new Set();
-  const slots = Array(Math.max(previous.length, ...pins.map(p => p.slot + 1), 0)).fill(null);
-  for (const p of pins) { slots[p.slot] = p.key; placed.add(p.key); }
-  previous.forEach((key, i) => {
-    if (live.has(key) && !placed.has(key) && slots[i] === null) { slots[i] = key; placed.add(key); }
-  });
-  for (const { key } of items) if (!placed.has(key)) {
-    const free = slots.indexOf(null);
-    if (free < 0) slots.push(key); else slots[free] = key;
-    placed.add(key);
-  }
-  while (slots.length && slots.at(-1) === null) slots.pop();
-  return slots;
+// Key order: what needs a click first (waiting, error, unread), then what is running.
+// Quiet sessions (idle, unknown) start on the next page so page 1 only shows what matters.
+// Within a tier, sessions keep their previous order; pins keep their reserved slot.
+const TIER = { attention: 0, error: 1, done: 2, working: 3 };
+const tier = s => TIER[s.eff] ?? 4;
+
+export function prioritySlots(items, previous = [], pins = [], cap = Infinity) {
+  const was = new Map(previous.map((key, i) => [key, i]));
+  const pinned = new Set(pins.map(p => p.key));
+  const order = items.filter(s => !pinned.has(s.key)).sort((a, b) =>
+    tier(a) - tier(b) || (was.get(a.key) ?? Infinity) - (was.get(b.key) ?? Infinity) || b.since - a.since);
+  const slots = [];
+  for (const p of pins) slots[p.slot] = p.key;
+  let i = 0;
+  const place = s => { while (slots[i] != null) i++; slots[i++] = s.key; };
+  const front = order.filter(s => tier(s) < 4), quiet = order.filter(s => tier(s) === 4);
+  front.forEach(place);
+  if (front.length && quiet.length && Number.isFinite(cap)) i = Math.ceil(i / cap) * cap;
+  quiet.forEach(place);
+  return Array.from(slots, key => key ?? null);
 }
 
 export function projectGroups(sessions, pins = []) {

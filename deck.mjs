@@ -2,7 +2,7 @@
 // AI Stream Decker: shows Claude Code + ChatGPT/Codex sessions on an Elgato Stream Deck (direct HID, no Elgato app).
 import { listStreamDecks, openStreamDeck } from '@elgato-stream-deck/node';
 import { svg, pagerSvg, projectSvg, controlSvg, sessionLabels, render } from './render.mjs';
-import { PRIORITY as PRI, preferences, stableSlots, projectGroups, projectId, projectName, waitingSessions, nextWaiting } from './model.mjs';
+import { PRIORITY as PRI, preferences, prioritySlots, projectGroups, projectId, projectName, waitingSessions, nextWaiting } from './model.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -266,7 +266,7 @@ function buildView(n = keys.length) {
   const cap = n - 3;
   const items = view === 'projects' ? groups : [...sessions.values()].filter(s => view === 'all' || `project:${projectId(s.cwd)}` === view);
   const pins = prefs.pins.filter(p => p.view === view);
-  const slots = stableSlots(items, layouts.get(view), pins);
+  const slots = prioritySlots(items, layouts.get(view), pins, cap);
   layouts.set(view, slots);
   pageCount = Math.max(1, Math.ceil(slots.length / cap));
   page = Math.min(page, pageCount - 1);

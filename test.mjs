@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { preferences, stableSlots, projectGroups, waitingSessions, nextWaiting } from './model.mjs';
+import { preferences, prioritySlots, projectGroups, waitingSessions, nextWaiting } from './model.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aideck-')));
@@ -134,13 +134,20 @@ assert.equal(preferences({ pageResetSeconds: 20 }).pageResetSeconds, 20);
 const pin = { view: 'all', key: 'claude:b', slot: 4, title: 'B', app: 'claude' };
 assert.deepEqual(preferences({ pageResetSeconds: -1, pins: [pin, pin, { ...pin, slot: 1e9 }, null] }), { pageResetSeconds: 0, pins: [pin] });
 const list = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((key, i) => ({ key: `claude:${key}`, cwd: i < 3 ? '/work/Shop' : '/work/Tools', eff: i < 2 ? 'attention' : 'working', since: i + 1 }));
-const slots = stableSlots(list);
-assert.deepEqual(stableSlots([...list].reverse(), slots), slots);
-const pinned = stableSlots(list, slots, [pin]);
+const slots = prioritySlots(list);
+assert.deepEqual(prioritySlots([...list].reverse(), slots), slots); // same tier keeps its order
+assert.deepEqual(slots.slice(0, 2).sort(), ['claude:a', 'claude:b']); // waiting before working
+const pinned = prioritySlots(list, slots, [pin]);
 assert.equal(pinned[4], 'claude:b');
 assert.equal(new Set(pinned.filter(Boolean)).size, list.length);
-assert.equal(stableSlots(list.filter(s => s.key !== pin.key), pinned, [pin])[4], pin.key);
-assert.deepEqual(stableSlots([], [], [pin]), [null, null, null, null, pin.key]);
+assert.equal(prioritySlots(list.filter(s => s.key !== pin.key), pinned, [pin])[4], pin.key);
+assert.deepEqual(prioritySlots([], [], [pin]), [null, null, null, null, pin.key]);
+const quiet = ['q1', 'q2'].map((key, i) => ({ key: `codex:${key}`, eff: i ? 'unknown' : 'idle', since: 9 }));
+const urgent = [{ key: 'claude:new', eff: 'done', since: 1 }, { key: 'claude:err', eff: 'error', since: 1 }];
+// a long-idle session loses its key to anything that needs a click, and quiet ones move to page 2
+assert.deepEqual(prioritySlots([...quiet, ...urgent], ['codex:q1', 'codex:q2'], [], 4), ['claude:err', 'claude:new', null, null, 'codex:q1', 'codex:q2']);
+assert.deepEqual(prioritySlots(quiet, [], [], 4), ['codex:q1', 'codex:q2']); // nothing urgent: quiet stays on page 1
+assert.deepEqual(prioritySlots([...quiet, ...urgent]), ['claude:err', 'claude:new', 'codex:q1', 'codex:q2']); // no page size: no page break
 const summaries = projectGroups(list);
 assert.deepEqual(summaries.map(g => [g.title, g.working, g.attention]), [['Shop', 1, 2], ['Tools', 4, 0]]);
 assert.equal(projectGroups([], [{ ...pin, view: 'project:/work/Shop' }])[0].key, 'project:/work/Shop');
@@ -149,7 +156,7 @@ assert.equal(nextWaiting(list).key, 'claude:a');
 assert.equal(nextWaiting(list, list[0]).key, 'claude:b');
 assert.equal(nextWaiting(list.filter(s => s.key !== 'claude:a'), list[0]).key, 'claude:b');
 assert.equal(nextWaiting([]), null);
-console.log('model: all-page stability, reserved pins, project counts, optional reset and inbox order ok');
+console.log('model: priority order, quiet sessions on later pages, stable tiers, reserved pins, project counts, optional reset and inbox order ok');
 
 const iterm = terminalTarget({ term: 'iTerm.app', terminalSession: 'w0t0p0:TEST-ID' });
 assert.deepEqual(iterm.open, ['open', ['iterm2:reveal?sessionid=w0t0p0%3ATEST-ID']]);
@@ -288,9 +295,10 @@ export async function openStreamDeck(path) {
           await press(5, true); // back to page 1
           await press(5); // forward to page 2
           write(hookFile('s6'), { ...read(hookFile('s6')), state: 'error', at: Date.now(), since: Date.now() });
-          write(hookFile('s7'), { ...read(hookFile('s6')), sid: 's7', state: 'attention' });
+          write(hookFile('s7'), { ...read(hookFile('s6')), sid: 's7', state: 'attention', terminalSession: 'w0t0p0:s7' });
           await delay(1100);
-          await press(1); // s5 keeps its place despite new high-priority sessions
+          await press(5, true); // back to page 1
+          await press(1); // the new waiting s7 took the first free key on page 1 (key 0 is the pinned s2)
           await press(3); // projects
           await press(0); // Shop (alphabetically first with attention)
           await press(0, true); // independent project pin
@@ -314,7 +322,7 @@ export async function openStreamDeck(path) {
       const file = home + '/.ai-deck/claude/s3.json';
       const s = JSON.parse(fs.readFileSync(file, 'utf8'));
       fs.writeFileSync(file, JSON.stringify({ ...s, state: 'done', since: Date.now(), at: Date.now() }));
-      setTimeout(() => { d.emit('down', { type: 'encoder', index: 0 }); d.emit('up', { type: 'encoder', index: 0 }); d.emit('down', d.CONTROLS[2]); d.emit('up', d.CONTROLS[2]); }, 250);
+      setTimeout(() => { d.emit('down', { type: 'encoder', index: 0 }); d.emit('up', { type: 'encoder', index: 0 }); d.emit('down', d.CONTROLS[0]); d.emit('up', d.CONTROLS[0]); }, 250); // the finished s3 moved to the first key
       setTimeout(() => process.kill(process.pid, 'SIGTERM'), 600);
     }
   };
@@ -323,7 +331,7 @@ export async function openStreamDeck(path) {
 `);
 for (const failure of ['disconnect', 'init']) {
   fs.rmSync(path.join(home, 'device.jsonl'), { force: true });
-  fs.rmSync(path.join(home, '.ai-deck/seen.json'), { force: true });
+  fs.writeFileSync(path.join(home, '.ai-deck/seen.json'), '{}'); // not a first run: s3's later "done" must stay unread
   fs.rmSync(path.dirname(file), { recursive: true, force: true });
   fs.mkdirSync(path.dirname(file));
   for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(path.dirname(file), `s${i}.json`), JSON.stringify({ sid: `s${i}`, cwd: `/p/${i}`, state: 'working', at: Date.now(), since: Date.now() - i * 1000 }));
@@ -355,8 +363,8 @@ const runFeatures = mode => {
   return run;
 };
 const features = runFeatures('features');
-assert.deepEqual([...features.stdout.matchAll(/open claude:(s\d+)/g)].map(m => m[1]), ['s1', 's2', 's2', 's4', 's5', 's3'], features.stdout);
-assert.deepEqual(fs.readFileSync(path.join(home, 'open.log'), 'utf8').trim().split('\n'), ['-a', 'Visual Studio Code', ...['s2', 's2', 's4', 's5', 's3'].map(id => `iterm2:reveal?sessionid=w0t0p0%3A${id}`)]);
+assert.deepEqual([...features.stdout.matchAll(/open claude:(s\d+)/g)].map(m => m[1]), ['s1', 's2', 's2', 's4', 's7', 's3'], features.stdout);
+assert.deepEqual(fs.readFileSync(path.join(home, 'open.log'), 'utf8').trim().split('\n'), ['-a', 'Visual Studio Code', ...['s2', 's2', 's4', 's7', 's3'].map(id => `iterm2:reveal?sessionid=w0t0p0%3A${id}`)]);
 const prefsFile = path.join(home, '.ai-deck/preferences.json');
 assert.deepEqual(read(prefsFile).pins.map(({ view, key, slot }) => ({ view, key, slot })), [{ view: 'all', key: 'claude:s2', slot: 0 }]);
 assert.equal(fs.statSync(prefsFile).mode & 0o777, 0o600);
@@ -364,7 +372,7 @@ const projectPin = fs.readFileSync(path.join(home, 'device.jsonl'), 'utf8').trim
 assert.deepEqual(projectPin.detail.map(p => p.view).sort(), ['all', 'project:/work/Shop']);
 assert.doesNotMatch(runFeatures('restore').stdout, /open claude:/);
 assert.deepEqual(read(prefsFile).pins, []);
-console.log('features: inbox, paging, stable overflow, projects, per-view pins, persistence and optional page reset ok');
+console.log('features: inbox, paging, urgent sessions on page 1, projects, per-view pins, persistence and optional page reset ok');
 } finally {
   if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
   fs.rmSync(home, { recursive: true, force: true });

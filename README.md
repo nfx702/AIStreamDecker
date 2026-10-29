@@ -41,7 +41,7 @@ The palette follows the Codex Micro status colors, slightly saturated so they gl
 | **working** | steady blue, `•` badge | The agent is thinking or running tools | "Thinking" |
 | **done** | green, brief pulse during the first four seconds, then steady, `✓` badge | Finished, and you haven't looked at it yet | "Unread chat" |
 | **error** | steady red, `!` badge | The turn ended on an API or stream error | "Error" |
-| **idle** | dimmed, grayscale icon, no animation | Nothing happening (idle sessions are listed too, as a quick switcher) | "Inactive" |
+| **idle** | dimmed, grayscale icon, no animation | Nothing happening (listed as a quick switcher; while anything needs you, they move to later pages) | "Inactive" |
 | **unknown** | purple dashed border, `–` badge | The source is unreadable, has no known status, or stopped reporting activity | — |
 
 Every key shows a small **app icon**, **project name**, up to **three title lines**, and a **status with elapsed time** at the bottom (`<1m`, `12m`, `3h`, `2d`). Long titles keep their ending so similar tasks remain distinguishable; identical visible labels receive `#1`, `#2`, etc. Pinned sessions have a small pin symbol. Unknown sessions show **Stand …**, the age of the last successful read (or last activity for stale working sessions), instead of pretending to be idle.
@@ -160,9 +160,15 @@ A finished session stays green until you have looked at it:
 
 ### Key layout and paging
 
-New layouts rank sessions by importance: **attention > error > unknown > done > working > idle**, then by recency. Positions remain stable on **every page** while the daemon runs: state changes do not move existing sessions, new sessions fill gaps, and unused trailing pages disappear. Project views keep their own layouts. A press targets the key that was displayed when the press began, even if a refresh happens while it is held.
+Keys are ordered by what needs you, so page 1 never fills up with irrelevant sessions:
 
-Pins reserve their positions across restarts and even while a session is inactive. Unpinned sessions are ranked again after a restart. Projects are grouped by their normalized working directory (`cwd`); sessions without one appear under **Allgemein**. Projects with the same folder name include their parent folder in the label. The global waiting queue remains accessible from every view.
+1. **Needs a click:** waiting for you (attention), then errors, then finished-but-unread (done).
+2. **Running:** working sessions.
+3. **Quiet:** idle and unknown sessions. When anything from tiers 1–2 is on the deck, quiet sessions start on the **next page**; if nothing needs you, they fill page 1 as usual.
+
+A session that changes tier moves right away (e.g. a finished session jumps to the front). Within a tier, sessions keep their previous order, so keys don't shuffle on every refresh. Project views are ordered the same way and keep their own layouts. A press targets the key that was displayed when the press began, even if a refresh happens while it is held.
+
+Pins reserve their positions across restarts and even while a session is inactive. Unpinned sessions are continuously ordered by the tiers above. Projects are grouped by their normalized working directory (`cwd`); sessions without one appear under **Allgemein**. Projects with the same folder name include their parent folder in the label. The global waiting queue remains accessible from every view.
 
 ### Rendering pipeline
 
@@ -233,8 +239,8 @@ Status: on the development machine, macOS (26) has not yet applied the grant to 
 
 | File | Purpose |
 |---|---|
-| [`deck.mjs`](deck.mjs) | daemon: data sources, ranking, stable slots, paging, device I/O, key presses |
-| [`model.mjs`](model.mjs) | project grouping, stable slots, validated preferences and waiting queue |
+| [`deck.mjs`](deck.mjs) | daemon: data sources, ranking, priority slots, paging, device I/O, key presses |
+| [`model.mjs`](model.mjs) | project grouping, priority slots, validated preferences and waiting queue |
 | [`render.mjs`](render.mjs) | key artwork (SVG), animation phases, raster cache |
 | [`hook.mjs`](hook.mjs) | Claude Code hook → per-session status file |
 | [`install.mjs`](install.mjs) | installs/uninstalls hooks and LaunchAgents |
