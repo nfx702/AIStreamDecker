@@ -8,7 +8,7 @@ export function preferences(value) {
   const pins = [], keys = new Set(), slots = new Set();
   for (const p of Array.isArray(value?.pins) ? value.pins : []) {
     if (!p || typeof p.view !== 'string' || !(p.view === 'all' || p.view.startsWith('project:')) ||
-        typeof p.key !== 'string' || !/^(claude|codex):.+$/.test(p.key) ||
+        typeof p.key !== 'string' || !/^(claude|codex|gpt):.+$/.test(p.key) ||
         !Number.isInteger(p.slot) || p.slot < 0 || p.slot > 4095) continue;
     const key = JSON.stringify([p.view, p.key]), slot = JSON.stringify([p.view, p.slot]);
     if (keys.has(key) || slots.has(slot)) continue;

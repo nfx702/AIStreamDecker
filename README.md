@@ -1,7 +1,7 @@
 # AI Stream Decker
 
 **Turn an Elgato Stream Deck into a live control center for your AI agents.**
-Every Claude Code session and every ChatGPT/Codex thread gets its own key. The key shows what that agent is doing *right now*: thinking, waiting for your approval, finished, failed or idle. Open sessions with one press, group them by project, and pin the ones you keep coming back to. A dedicated **Braucht mich** key takes you through pending questions and approvals.
+Every Claude Code session, every Codex thread and every ChatGPT chat gets its own key. The key shows what that agent is doing *right now*: thinking, waiting for your approval, finished, failed or idle. Open sessions with one press, group them by project, and pin the ones you keep coming back to. A dedicated **Braucht mich** key takes you through pending questions and approvals.
 
 ![Animated preview of all key states](docs/preview.gif)
 
@@ -19,12 +19,12 @@ Every Claude Code session and every ChatGPT/Codex thread gets its own key. The k
   - [Architecture](#architecture)
   - [Claude Code](#claude-code)
   - [ChatGPT / Codex](#chatgpt--codex)
+  - [ChatGPT chats](#chatgpt-chats)
   - ["Seen" logic](#seen-logic)
   - [Key layout and paging](#key-layout-and-paging)
   - [Rendering pipeline](#rendering-pipeline)
 - [Configuration](#configuration)
 - [Prior art (why build this?)](#prior-art-why-build-this)
-- [ChatGPT chat sessions (experimental)](#chatgpt-chat-sessions-experimental)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [Project layout](#project-layout)
@@ -53,6 +53,7 @@ Every key shows a small **app icon**, **project name**, up to **three title line
 - An Elgato Stream Deck with at least four LCD keys. Developed on a Stream Deck MK.2 / Original v2 (15 keys, 72×72 px). Key count and pixel size are read from the device; pedals and encoders are ignored.
 - **The Elgato Stream Deck app must not be running.** This project talks to the device directly over USB HID, and only one program can own it.
 - Claude Code (CLI and/or the Claude desktop app's Code tab) and/or the ChatGPT desktop app (bundle id `com.openai.codex`, which ships Codex)
+- For ChatGPT chats only: the ChatGPT app started with its local debug port (see [ChatGPT chats](#chatgpt-chats))
 
 ## Install
 
@@ -81,6 +82,7 @@ node install.mjs --uninstall
   - Claude desktop sessions open via `claude://code/continue?session=local_…`.
   - Claude CLI sessions target their **iTerm pane or Terminal tab** when the hook captured its identity. Other terminals fall back to opening the app and briefly show **Nur App geöffnet** on the key.
   - Codex threads open via `codex://threads/<id>`.
+  - ChatGPT chats open by selecting the chat in the app's sidebar, then bringing ChatGPT to the front.
 - **Hold a session key for 0.7 s** to pin or unpin it. Pins are saved separately in the all-sessions view and each project. An ended pinned session keeps its key as **Nicht aktiv** until you unpin it.
 - **Projekte** opens the project overview. Each project shows how many sessions are active or waiting, plus an unknown-status count when needed. Press a project to see its sessions; press **Projekte** again to go back. Hold the navigation key to return directly to all sessions.
 - **Braucht mich** shows the number of waiting sessions across all projects. Each press opens the next one, starting with the oldest request. Resolved requests leave the queue automatically. This opens the session; it does not answer questions or approve actions.
@@ -107,13 +109,14 @@ The last three keys always contain project navigation, **Braucht mich**, and the
  Claude Code (CLI + desktop) ──hooks──▶ hook.mjs ──▶ ~/.ai-deck/claude/<session>.json ─┐
  Claude desktop session store ─────────▶ …/Claude/claude-code-sessions/**/local_*.json ─┤ title, deep-link id, lastFocusedAt
  ChatGPT app / Codex ──────────────────▶ ~/.codex/state_5.sqlite  (threads)             ├──▶ deck.mjs ──USB HID──▶ Stream Deck
-                                        ~/.codex/sessions/**/rollout-*.jsonl (events) ─┘        │   ▲
+                                        ~/.codex/sessions/**/rollout-*.jsonl (events) ─┤
+ ChatGPT app / chats ── 127.0.0.1 DevTools port ─▶ gpt.mjs (sidebar title + status) ───┘        │   ▲
                                                                                                 │   └── key press
                                                                      render.mjs (SVG → sharp → RGB) ◀┘
                                                                      open claude://… / codex://…
 ```
 
-Everything is local. Nothing is sent anywhere, and no credentials or API tokens are touched.
+Everything is local. Nothing is sent anywhere, and no credentials or API tokens are touched. The ChatGPT chat source needs the app's debug port; see its security note below.
 
 ### Claude Code
 
@@ -149,6 +152,33 @@ The ChatGPT desktop app stores every Codex thread in `~/.codex/state_5.sqlite` (
 Sub-agent threads (`source` is a JSON object) are hidden. Archived threads disappear. "Work" and voice threads from the app are included.
 
 Read errors retain previously known sessions as **unknown**, including during database migrations or temporarily unavailable rollout files. The next successful refresh restores their status. Without a cached thread list, an unreadable Codex source gets its own diagnostic key. A successful read that contains no recognized lifecycle event also yields unknown. Claude hook read failures retain known sessions in the same way; a normal `SessionEnd` removes them.
+
+### ChatGPT chats
+
+Plain ChatGPT conversations (not Codex threads) live on OpenAI's servers; the app keeps no live local record of them. The only reliable local signal is the app itself: every chat row in its sidebar carries the same status the app draws next to it (`statusState`):
+
+| ChatGPT sidebar status | State |
+|---|---|
+| a reply is streaming (`loading`) | working |
+| unread reply (`unread`) | done |
+| `error` | error |
+| `idle` | idle |
+
+[`gpt.mjs`](gpt.mjs) reads exactly that, plus each chat's title, through the app's local **Chrome DevTools port**. It never reads message content. Pressing a key selects the chat in the sidebar and brings ChatGPT to the front. "Unread" is the app's own flag, so reading a chat in ChatGPT clears the key as well.
+
+**Starting ChatGPT with the debug port.** Quit ChatGPT (⌘Q), then:
+
+```bash
+open -a ChatGPT --args --remote-debugging-port=0
+```
+
+`0` picks a random free port on `127.0.0.1` only; the app writes it to `~/Library/Application Support/Codex/DevToolsActivePort`, where the daemon finds it. The switch only lasts until ChatGPT quits: after a normal restart or an automatic update, the deck shows a single **GPT nicht verbunden** key until you start ChatGPT this way again.
+
+> **Security note:** while the debug port is open, any program running under your user account can control your signed-in ChatGPT app, not just the deck. Only use it on a machine you trust.
+
+Only chats the app's sidebar currently shows can appear, so the sidebar must be in **ChatGPT** mode and your sidebar filter decides which chats are listed.
+
+An earlier attempt via the macOS Accessibility API is kept in [`gpt-ax/`](gpt-ax) (installed only with `node install.mjs --gpt`). It is not needed for the approach above; on macOS 26 the Accessibility grant could not be applied reliably to it.
 
 ### "Seen" logic
 
@@ -206,17 +236,10 @@ As of October 2026:
 
 None of them shows **Claude Code and Codex side by side**, and none deep-links into the *exact* desktop session. Driving the device directly over HID also removes the dependency on the Elgato app and its plugin packaging.
 
-## ChatGPT chat sessions (experimental)
-
-Plain ChatGPT conversations (not Codex threads) are **not shown yet**. Unlike Codex, they live on the server: the app keeps no live local record of them. The only local cache (`codex.chatgpt-conversations` in the app's LocalStorage) is a stale list snapshot.
-
-The remaining local signal is the app's UI itself. [`gpt-ax/`](gpt-ax) contains a small Swift bridge (`AIStreamDeckerGPT.app`) that reads the ChatGPT window via the macOS Accessibility API. It dumps the tree to `~/.ai-deck/gpt-ax.json` and can press elements on request. This directory is restricted to the current user because the tree can contain conversation text. Element paths are validated before use. All interpretation is meant to happen in JS, so routine interpretation changes do not require a binary rebuild. It is installed only with `node install.mjs --gpt` and needs **Accessibility permission**.
-
-Status: on the development machine, macOS (26) has not yet applied the grant to the bridge reliably. The details are in the troubleshooting section below. Once it reads the tree, the plan is to parse the sidebar's chat list and streaming indicators into the same state model.
-
 ## Limitations
 
 - Ordinary Claude chats (outside the Code tab) have no status interface and are not shown.
+- ChatGPT chats need ChatGPT started with its debug port and only cover chats listed in the app's sidebar.
 - Codex approval prompts appear as attention only if Codex writes the request into the rollout. Otherwise the thread stays "working".
 - For Codex, "seen" only works by key press, because the app does not record which thread you are looking at.
 - Sessions that ran before installation appear after their next hook event (desktop sessions appear immediately as idle).
@@ -233,6 +256,7 @@ Status: on the development machine, macOS (26) has not yet applied the grant to 
 | `deck.log` shows `codex read failed` | Check whether the Codex database is being migrated or is unavailable. Known sessions remain visible as unknown and recover after a successful refresh. |
 | A terminal key shows `Nur App geöffnet` | Start a new Claude CLI session to capture its terminal identity. For Apple Terminal, allow Automation access when macOS asks. Other terminal apps currently use app-level fallback. |
 | A pinned key says `Nicht aktiv` | The session ended or left the activity window. Hold the key to free its reserved position. |
+| A key says `GPT nicht verbunden` | ChatGPT runs without its debug port (e.g. after an update). Quit it and start it with `open -a ChatGPT --args --remote-debugging-port=0`. |
 | GPT bridge reports `"trusted": false` | Remove every `AIStreamDeckerGPT` / `gpt-ax` entry under *System Settings → Privacy & Security → Accessibility*, run `tccutil reset Accessibility de.nfxmedia.aistreamdecker.gpt`, then add `gpt-ax/AIStreamDeckerGPT.app` again. `build.sh` signs with your *Apple Development* identity when one exists, so the grant survives rebuilds. |
 
 ## Project layout
@@ -246,5 +270,6 @@ Status: on the development machine, macOS (26) has not yet applied the grant to 
 | [`install.mjs`](install.mjs) | installs/uninstalls hooks and LaunchAgents |
 | [`test.mjs`](test.mjs) | isolated regression checks for sources, rendering, installation, terminals and deck interactions |
 | [`preview.mjs`](preview.mjs) | renders the session deck animation and project overview in `docs/` |
-| [`gpt-ax/`](gpt-ax) | experimental Accessibility bridge for ChatGPT chats |
+| [`gpt.mjs`](gpt.mjs) | ChatGPT chats: sidebar status via the app's local DevTools port, open by selecting the chat |
+| [`gpt-ax/`](gpt-ax) | earlier, optional Accessibility bridge for ChatGPT chats (not needed) |
 | `assets/` | app icons, extracted from the installed apps by `install.mjs` (not committed: vendor trademarks) |

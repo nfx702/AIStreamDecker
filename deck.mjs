@@ -3,6 +3,7 @@
 import { listStreamDecks, openStreamDeck } from '@elgato-stream-deck/node';
 import { svg, pagerSvg, projectSvg, controlSvg, sessionLabels, render } from './render.mjs';
 import { PRIORITY as PRI, preferences, prioritySlots, projectGroups, projectId, projectName, waitingSessions, nextWaiting } from './model.mjs';
+import { gptSessions } from './gpt.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -237,7 +238,7 @@ async function refresh(n) {
   const now = Date.now();
   const saved = readJson(PREFS_FILE);
   if (saved) prefs = preferences(saved);
-  const list = [...claudeSessions(now, await frontApp()), ...codexSessions(now)];
+  const list = [...claudeSessions(now, await frontApp()), ...codexSessions(now), ...await gptSessions(now)];
   if (firstRun) {
     for (const s of list) if (s.state === 'done') seen[s.key] = now; // don't light up history on first start
     saveSeen();
@@ -246,7 +247,7 @@ async function refresh(n) {
   for (const s of list) {
     if (s.onScreen && s.state === 'done' && (seen[s.key] ?? 0) < s.since) markSeen(s.key); // finished while you watched it
     s.eff = effective(s, now);
-    s.projectLabel = projectName(projectId(s.cwd));
+    s.projectLabel = s.app === 'gpt' ? 'ChatGPT' : projectName(projectId(s.cwd));
   }
   const labels = sessionLabels(list);
   for (const s of list) s.lines = labels.get(s.key);
@@ -283,7 +284,7 @@ function buildView(n = keys.length) {
   );
 }
 
-const runOpen = target => new Promise((resolve, reject) =>
+const runOpen = target => typeof target === 'function' ? target() : new Promise((resolve, reject) =>
   execFile(target[0], target[1], { timeout: 5000 }, e => e ? reject(e) : resolve()));
 
 async function openSession(s) {
@@ -319,7 +320,7 @@ async function activate(item, held = false) {
       const s = nextWaiting([...sessions.values()], lastInbox);
       if (s && await openSession(s)) lastInbox = { key: s.key, since: s.since };
     } finally { inboxBusy = false; }
-  } else if (held && /^(claude|codex):/.test(item.key)) {
+  } else if (held && /^(claude|codex|gpt):/.test(item.key)) {
     const pins = prefs.pins.filter(p => !(p.view === view && p.key === item.key));
     if (!item.pinned) pins.push({ view, key: item.key, slot: item.slot, title: item.title, app: item.app });
     const next = preferences({ ...prefs, pins });

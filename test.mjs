@@ -158,6 +158,23 @@ assert.equal(nextWaiting(list.filter(s => s.key !== 'claude:a'), list[0]).key, '
 assert.equal(nextWaiting([]), null);
 console.log('model: priority order, quiet sessions on later pages, stable tiers, reserved pins, project counts, optional reset and inbox order ok');
 
+const { toSessions, openChat } = await import('./gpt.mjs');
+const chat = n => `6ae43a02-f3b0-83ed-a6bc-4ad74bbe9f3${n}`;
+const gptRows = [
+  { id: chat(1), title: 'Streams', status: 'loading', updated: '2026-10-30T06:00:00Z' },
+  { id: chat(2), title: 'Unread', status: 'idle', unread: true, updated: '2026-10-30T06:00:00Z' },
+  { id: chat(3), title: 'Broken', status: 'error' },
+  { id: chat(4), title: '', status: 'idle', updated: '2026-10-30T05:00:00Z' },
+  { id: 'x"]; alert(1); //', title: 'Injected', status: 'idle' },
+];
+const gpt = toSessions(gptRows, 1000);
+assert.deepEqual(gpt.map(s => [s.key.slice(-1), s.state, s.title]), [['1', 'working', 'Streams'], ['2', 'done', 'Unread'], ['3', 'error', 'Broken'], ['4', 'idle', 'ChatGPT']]);
+assert.equal(gpt[3].since, Date.parse('2026-10-30T05:00:00Z')); // idle: age of the last message
+assert.equal(toSessions([{ ...gptRows[0] }], 5000)[0].since, gpt[0].since); // still streaming: unchanged
+assert.equal(toSessions([{ ...gptRows[0], status: 'idle', unread: true }], 6000)[0].since, 6000); // finished now
+await assert.rejects(openChat('x"]; alert(1); //'), /invalid chat id/);
+console.log('gpt: sidebar status mapping, transition times, unsafe ids rejected ok');
+
 const iterm = terminalTarget({ term: 'iTerm.app', terminalSession: 'w0t0p0:TEST-ID' });
 assert.deepEqual(iterm.open, ['open', ['iterm2:reveal?sessionid=w0t0p0%3ATEST-ID']]);
 assert.equal(iterm.exact, true);
@@ -174,7 +191,7 @@ console.log('terminals: native iTerm link, argument-safe Terminal targeting and 
 
 const project = path.join(home, 'repo space \' " $(touch INJECTED) & < >');
 fs.mkdirSync(path.join(project, 'node_modules'), { recursive: true });
-for (const file of ['render.mjs', 'install.mjs', 'hook.mjs', 'deck.mjs', 'model.mjs']) fs.copyFileSync(path.join(root, file), path.join(project, file));
+for (const file of ['render.mjs', 'install.mjs', 'hook.mjs', 'deck.mjs', 'model.mjs', 'gpt.mjs']) fs.copyFileSync(path.join(root, file), path.join(project, file));
 fs.symlinkSync(path.join(root, 'node_modules/sharp'), path.join(project, 'node_modules/sharp'));
 const { svg, render, pagerSvg, projectSvg, sessionLabels } = await import(pathToFileURL(path.join(project, 'render.mjs')));
 for (const app of ['claude', 'codex']) for (const eff of ['working', 'attention', 'done', 'idle', 'error', 'unknown']) {
